@@ -42,6 +42,16 @@ function removeDuplicateQuotes() {
   var dataRows   = allValues.slice(1, 51); // top 50 data rows
   Logger.log('Data rows to process: ' + dataRows.length + ' | columns: ' + numCols);
 
+  // Log header so column positions are visible in the execution log.
+  Logger.log('Header row: ' + JSON.stringify(allValues[0]));
+
+  // Log first 3 data rows to confirm what is actually in columns E (4) and F (5).
+  for (var d = 0; d < Math.min(3, dataRows.length); d++) {
+    Logger.log('Data row ' + (d + 2) + ' col E=' + JSON.stringify(dataRows[d][4]) +
+               ' col F=' + JSON.stringify(dataRows[d][5]) +
+               ' full=' + JSON.stringify(dataRows[d]));
+  }
+
   var seen       = {};
   var uniqueRows = [];
 
@@ -50,7 +60,9 @@ function removeDuplicateQuotes() {
     var dateValue = row[4];                       // Column E
     var customer  = String(row[5]).trim();        // Column F
 
-    if (!dateValue && !customer) continue;        // skip blank rows
+    // Skip only rows that are entirely blank across all cells.
+    var allBlank = row.every(function(cell) { return cell === '' || cell === null || cell === undefined; });
+    if (allBlank) continue;
 
     var weekKey   = getWeekStartKey(dateValue);
     var dedupeKey = weekKey + '|' + customer.toLowerCase();
