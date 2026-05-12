@@ -133,7 +133,17 @@ function removeTrigger() {
 function getWeekStartKey(dateValue) {
   if (!dateValue) return 'no-date';
 
-  var date = (dateValue instanceof Date) ? dateValue : new Date(dateValue);
+  var date;
+
+  if (dateValue instanceof Date) {
+    date = dateValue;
+  } else {
+    // Column E contains strings like "11/5/2026-21:50:18:354-v31q9".
+    // Extract just the leading date portion before the first hyphen.
+    var str = String(dateValue);
+    var dateMatch = str.match(/^(\d{1,2}\/\d{1,2}\/\d{4})/);
+    date = dateMatch ? new Date(dateMatch[1]) : new Date(str);
+  }
 
   if (isNaN(date.getTime())) return String(dateValue);
 
