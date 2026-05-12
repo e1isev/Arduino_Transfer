@@ -1,0 +1,1173 @@
+
+#include <SPI.h>
+#include <Ethernet.h>
+#include <EthernetUdp.h>
+
+// =====================================================
+// NETWORK SETTINGS
+// =====================================================
+
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0x25, 0x60 };
+
+IPAddress arduinoIp(192, 168, 250, 3);
+IPAddress plcIp(192, 168, 250, 2);
+
+const uint16_t FINS_PORT = 9600;
+
+const byte PLC_NODE = 2;
+const byte ARDUINO_NODE = 3;
+
+EthernetUDP udp;
+byte sid = 1;
+
+const unsigned long FINS_REPLY_TIMEOUT_MS = 250;
+
+// =====================================================
+// PLC POSITION SETTINGS
+// =====================================================
+
+// Position starts at D2
+const uint16_t PLC_START_ADDRESS = 2;
+
+// Read D2 and D3 together as a 32 bit value
+const bool READ_32_BIT = true;
+
+// D2 = low word, D3 = high word
+// If Arduino position does not match PLC or HMI value, try false
+const bool LOW_WORD_FIRST = true;
+
+// Roll count range, 0 to 203500
+const uint32_t POSITION_MAX_VALUE = 203500UL;
+
+// =====================================================
+// START AND HOME WAIT SETTINGS
+// =====================================================
+
+// After calibration, the carriage is at sensor 2.
+// It waits there until the PLC count reaches this value.
+const uint32_t START_COUNT_TRIGGER = 2700UL;
+
+// How often to check PLC count while waiting at sensor 2
+const unsigned long START_WAIT_CHECK_MS = 250;
+
+// If the PLC count returns to zero during run mode,
+// go back to sensor 2 and hold there again.
+const bool RETURN_HOME_WHEN_PLC_COUNT_ZERO = true;
+const uint32_t RETURN_HOME_COUNT = 0UL;
+
+// =====================================================
+// AUTOMATIC PULSE TO STEP CALIBRATION
+// =====================================================
+
+// Your known correct baseline input speed
+const float BASELINE_ROLL_SPEED_PPS = 16.50;
+
+// These represent your original run behaviour
+const unsigned long ORIGINAL_RUN_STEP_DELAY_US = 2000;
+
+// Old code used 2000 us HIGH plus 2000 us LOW
+const unsigned long ORIGINAL_RUN_STEP_CYCLE_US = ORIGINAL_RUN_STEP_DELAY_US * 2UL;
+
+const int ORIGINAL_RUN_PAUSE_COUNT = 72;
+const unsigned long ORIGINAL_RUN_PAUSE_MS = 25000;
+
+// Safety fallback only, used if automatic calculation fails
+const float FALLBACK_STEPS_PER_ROLL_PULSE = 0.10;
+
+float calculatedStepsPerRollPulse = FALLBACK_STEPS_PER_ROLL_PULSE;
+
+// Fine tune after automatic calculation if needed.
+// 1.00 means use calculated value exactly.
+// 1.10 means move 10 percent more per roll pulse.
+// 0.90 means move 10 percent less per roll pulse.
+const float STEPS_PER_ROLL_PULSE_TRIM = 1.00;
+
+// =====================================================
+// END WAIT SCALING
+// =====================================================
+
+const bool SCALE_END_WAITS = true;
+
+const float MIN_VALID_WAIT_SPEED_PPS = 1.0;
+
+// Reduced scaling range so slow speed does not create huge end waits.
+const float MIN_END_WAIT_SCALE = 0.50;
+const float MAX_END_WAIT_SCALE = 1.50;
+
+float currentRollSpeedPps = BASELINE_ROLL_SPEED_PPS;
+float currentEndWaitScale = 1.0;
+
+// =====================================================
+// PLC SAMPLE AND RUN SETTINGS
+// =====================================================
+
+const unsigned long PLC_SAMPLE_INTERVAL_MS = 250;
+
+const long MAX_STEPS_PER_SAMPLE = 120;
+const float MAX_STEP_ACCUMULATOR = 2000.0;
+const long MAX_PULSE_CHANGE_PER_SAMPLE = 1000;
+
+const bool PRINT_ROLL_DEBUG = true;
+
+// =====================================================
+// STEPPER AND SENSOR SETTINGS
+// =====================================================
+
+const byte STEP_PIN = 8;
+const byte DIR_PIN  = 9;
+
+// Do not use D10 with Ethernet shield
+const byte ENA_PIN  = 3;
+const bool USE_ENABLE_PIN = false;
+const bool ENABLE_LEVEL   = LOW;
+
+// Sensors on A0 and A1, away from Ethernet shield pins
+const int proxPin  = A0;
+const int proxPin1 = A1;
+
+// Based on your working setup:
+// raw 1 = clear
+// raw 0 = triggered
+const byte PROX0_ACTIVE_STATE = LOW;
+const byte PROX1_ACTIVE_STATE = LOW;
+
+// =====================================================
+// STEP TIMING SETTINGS
+// =====================================================
+
+// Step driver gets a short clean pulse
+const unsigned int STEP_PULSE_WIDTH_US = 10;
+
+// Actual run step interval for the pulse based mode.
+// 4000 us is about 250 steps/sec and matches the original total cycle.
+const unsigned long RUN_STEP_INTERVAL_US = 4000;
+
+// Calibration and clearing speed.
+// Smaller number = faster movement.
+// Original was 4000. This is a little faster.
+const unsigned long SEARCH_STEP_INTERVAL_US = 4000;
+const unsigned long CLEAR_STEP_INTERVAL_US  = 4000;
+
+// Base end behaviour
+// Total normal end wait is now 30 seconds.
+const unsigned long END_DWELL_MS = 30000;
+const unsigned long END_SLACK_WAIT_MS = 30000;
+
+// =====================================================
+// SAFETY LIMITS
+// =====================================================
+
+const long MAX_SEARCH_STEPS = 50000;
+const long MAX_RUN_STEPS    = 60000;
+const long MAX_CLEAR_STEPS  = 3000;
+
+const bool FIRST_SEARCH_DIRECTION = LOW;
+
+// =====================================================
+// STORED PLC VALUES
+// =====================================================
+
+uint32_t lastPosition = 0;
+unsigned long lastReadTime = 0;
+bool haveLastReading = false;
+
+float stepAccumulator = 0.0;
+
+// =====================================================
+// STORED RUN VALUES
+// =====================================================
+
+enum SensorHit
+{
+  SENSOR_NONE,
+  SENSOR_PROX_0,
+  SENSOR_PROX_1,
+  SENSOR_BOTH
+};
+
+bool runModeEnabled = false;
+bool faulted = false;
+
+SensorHit firstSensorFound  = SENSOR_NONE;
+SensorHit secondSensorFound = SENSOR_NONE;
+
+SensorHit currentTargetSensor = SENSOR_NONE;
+bool currentRunDirection = LOW;
+
+long stepsBetweenSensors = 0;
+long stepsThisTraverse = 0;
+
+// =====================================================
+// SMALL HELPERS
+// =====================================================
+
+float clampFloat(float value, float minValue, float maxValue)
+{
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
+
+long absoluteLong(long value)
+{
+  if (value < 0)
+  {
+    return -value;
+  }
+
+  return value;
+}
+
+// =====================================================
+// PRINT HELPERS
+// =====================================================
+
+void printSensorName(SensorHit s)
+{
+  switch (s)
+  {
+    case SENSOR_PROX_0:
+      Serial.print(F("sensor A0"));
+      break;
+
+    case SENSOR_PROX_1:
+      Serial.print(F("sensor A1"));
+      break;
+
+    case SENSOR_BOTH:
+      Serial.print(F("BOTH"));
+      break;
+
+    default:
+      Serial.print(F("none"));
+      break;
+  }
+}
+
+// =====================================================
+// SENSOR HELPERS
+// =====================================================
+
+bool prox0Triggered()
+{
+  return digitalRead(proxPin) == PROX0_ACTIVE_STATE;
+}
+
+bool prox1Triggered()
+{
+  return digitalRead(proxPin1) == PROX1_ACTIVE_STATE;
+}
+
+SensorHit getSensorState()
+{
+  bool p0 = prox0Triggered();
+  bool p1 = prox1Triggered();
+
+  if (p0 && p1) return SENSOR_BOTH;
+  if (p0) return SENSOR_PROX_0;
+  if (p1) return SENSOR_PROX_1;
+  return SENSOR_NONE;
+}
+
+void printSensorStates()
+{
+  Serial.print(F("A0 raw "));
+  Serial.print(digitalRead(proxPin));
+  Serial.print(F(" active "));
+  Serial.print(prox0Triggered());
+
+  Serial.print(F(" | A1 raw "));
+  Serial.print(digitalRead(proxPin1));
+  Serial.print(F(" active "));
+  Serial.println(prox1Triggered());
+}
+
+// =====================================================
+// STEPPER HELPERS
+// =====================================================
+
+void delayUsLong(unsigned long us)
+{
+  if (us >= 1000UL)
+  {
+    delay(us / 1000UL);
+    delayMicroseconds(us % 1000UL);
+  }
+  else
+  {
+    delayMicroseconds(us);
+  }
+}
+
+void doOneStep(unsigned long stepIntervalUs)
+{
+  digitalWrite(STEP_PIN, HIGH);
+  delayMicroseconds(STEP_PULSE_WIDTH_US);
+  digitalWrite(STEP_PIN, LOW);
+
+  unsigned long lowTimeUs = 1;
+
+  if (stepIntervalUs > STEP_PULSE_WIDTH_US)
+  {
+    lowTimeUs = stepIntervalUs - STEP_PULSE_WIDTH_US;
+  }
+
+  delayUsLong(lowTimeUs);
+}
+
+void stopWithFault(const __FlashStringHelper* message)
+{
+  faulted = true;
+  runModeEnabled = false;
+
+  Serial.println();
+  Serial.println(F("FAULT"));
+  Serial.println(message);
+}
+
+// =====================================================
+// END WAIT SCALING HELPERS
+// =====================================================
+
+void updateEndWaitScaleFromSpeed(float pulsesPerSecond)
+{
+  float speedAbs = pulsesPerSecond;
+
+  if (speedAbs < 0)
+  {
+    speedAbs = -speedAbs;
+  }
+
+  if (speedAbs < MIN_VALID_WAIT_SPEED_PPS)
+  {
+    return;
+  }
+
+  currentRollSpeedPps = speedAbs;
+
+  float newScale = BASELINE_ROLL_SPEED_PPS / currentRollSpeedPps;
+  currentEndWaitScale = clampFloat(newScale, MIN_END_WAIT_SCALE, MAX_END_WAIT_SCALE);
+}
+
+unsigned long getScaledEndWaitMs(unsigned long baseWaitMs)
+{
+  if (!SCALE_END_WAITS)
+  {
+    return baseWaitMs;
+  }
+
+  unsigned long scaledWait = (unsigned long)((float)baseWaitMs * currentEndWaitScale);
+
+  if (scaledWait < 1UL)
+  {
+    scaledWait = 1UL;
+  }
+
+  return scaledWait;
+}
+
+// =====================================================
+// AUTOMATIC RELATION CALCULATION
+// =====================================================
+
+void calculateAutomaticStepsPerRollPulse()
+{
+  if (stepsBetweenSensors <= 0)
+  {
+    calculatedStepsPerRollPulse = FALLBACK_STEPS_PER_ROLL_PULSE;
+    Serial.println(F("Bad cal distance, using fallback relation"));
+    return;
+  }
+
+  float motionSeconds =
+    ((float)stepsBetweenSensors * (float)ORIGINAL_RUN_STEP_CYCLE_US) / 1000000.0;
+
+  float pauseSeconds =
+    ((float)ORIGINAL_RUN_PAUSE_COUNT * (float)ORIGINAL_RUN_PAUSE_MS) / 1000.0;
+
+  float originalTraverseSeconds = motionSeconds + pauseSeconds;
+
+  float rollPulsesDuringTraverse =
+    BASELINE_ROLL_SPEED_PPS * originalTraverseSeconds;
+
+  if (rollPulsesDuringTraverse <= 0.0)
+  {
+    calculatedStepsPerRollPulse = FALLBACK_STEPS_PER_ROLL_PULSE;
+    Serial.println(F("Bad pulse calc, using fallback relation"));
+    return;
+  }
+
+  calculatedStepsPerRollPulse =
+    ((float)stepsBetweenSensors / rollPulsesDuringTraverse) * STEPS_PER_ROLL_PULSE_TRIM;
+
+  Serial.println();
+  Serial.println(F("AUTO RELATION CALCULATED"));
+
+  Serial.print(F("Steps between sensors: "));
+  Serial.println(stepsBetweenSensors);
+
+  Serial.print(F("Motion seconds: "));
+  Serial.println(motionSeconds);
+
+  Serial.print(F("Pause seconds: "));
+  Serial.println(pauseSeconds);
+
+  Serial.print(F("Original traverse seconds: "));
+  Serial.println(originalTraverseSeconds);
+
+  Serial.print(F("Roll pulses in traverse: "));
+  Serial.println(rollPulsesDuringTraverse);
+
+  Serial.print(F("Steps per roll pulse: "));
+  Serial.println(calculatedStepsPerRollPulse, 6);
+
+  Serial.println();
+}
+
+// =====================================================
+// FINS READ
+// =====================================================
+
+bool readDMWords(uint16_t address, uint16_t wordCount, uint16_t *outWords)
+{
+  byte packet[18];
+  byte response[32];
+
+  byte thisSid = sid++;
+
+  packet[0] = 0x80;
+  packet[1] = 0x00;
+  packet[2] = 0x02;
+  packet[3] = 0x00;
+  packet[4] = PLC_NODE;
+  packet[5] = 0x00;
+  packet[6] = 0x00;
+  packet[7] = ARDUINO_NODE;
+  packet[8] = 0x00;
+  packet[9] = thisSid;
+
+  packet[10] = 0x01;
+  packet[11] = 0x01;
+
+  packet[12] = 0x82;
+
+  packet[13] = highByte(address);
+  packet[14] = lowByte(address);
+  packet[15] = 0x00;
+
+  packet[16] = highByte(wordCount);
+  packet[17] = lowByte(wordCount);
+
+  udp.beginPacket(plcIp, FINS_PORT);
+  udp.write(packet, sizeof(packet));
+  udp.endPacket();
+
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < FINS_REPLY_TIMEOUT_MS)
+  {
+    int packetSize = udp.parsePacket();
+
+    if (packetSize > 0)
+    {
+      int len = udp.read(response, sizeof(response));
+
+      if (len < 14 + wordCount * 2)
+      {
+        Serial.println(F("FINS response short"));
+        return false;
+      }
+
+      if (response[9] != thisSid)
+      {
+        continue;
+      }
+
+      uint16_t endCode = ((uint16_t)response[12] << 8) | response[13];
+
+      if (endCode != 0x0000)
+      {
+        Serial.print(F("FINS err 0x"));
+        Serial.println(endCode, HEX);
+        return false;
+      }
+
+      for (uint16_t i = 0; i < wordCount; i++)
+      {
+        int dataIndex = 14 + i * 2;
+        outWords[i] = ((uint16_t)response[dataIndex] << 8) | response[dataIndex + 1];
+      }
+
+      return true;
+    }
+  }
+
+  Serial.println(F("No PLC reply"));
+  return false;
+}
+
+// =====================================================
+// READ ROLL POSITION
+// =====================================================
+
+bool readRollPosition(uint32_t &position)
+{
+  if (READ_32_BIT)
+  {
+    uint16_t words[2];
+
+    if (!readDMWords(PLC_START_ADDRESS, 2, words))
+    {
+      return false;
+    }
+
+    if (LOW_WORD_FIRST)
+    {
+      position = ((uint32_t)words[1] << 16) | words[0];
+    }
+    else
+    {
+      position = ((uint32_t)words[0] << 16) | words[1];
+    }
+
+    return true;
+  }
+  else
+  {
+    uint16_t word;
+
+    if (!readDMWords(PLC_START_ADDRESS, 1, &word))
+    {
+      return false;
+    }
+
+    position = word;
+    return true;
+  }
+}
+
+// =====================================================
+// ROLL PULSE CHANGE
+// =====================================================
+
+long calculatePositionChange(uint32_t currentValue, uint32_t previousValue)
+{
+  long change = (long)currentValue - (long)previousValue;
+
+  long range = (long)POSITION_MAX_VALUE + 1L;
+  long halfRange = range / 2L;
+
+  if (change > halfRange)
+  {
+    change -= range;
+  }
+  else if (change < -halfRange)
+  {
+    change += range;
+  }
+
+  return change;
+}
+
+void setRollReferenceNow(bool printIt)
+{
+  uint32_t currentPosition;
+
+  if (readRollPosition(currentPosition))
+  {
+    lastPosition = currentPosition;
+    lastReadTime = millis();
+    haveLastReading = true;
+
+    if (printIt)
+    {
+      Serial.print(F("Roll ref "));
+      Serial.println(currentPosition);
+    }
+  }
+}
+
+void waitAndDiscardRollMovement(unsigned long waitMs)
+{
+  unsigned long startTime = millis();
+  unsigned long lastRefresh = 0;
+
+  while (millis() - startTime < waitMs)
+  {
+    if (millis() - lastRefresh >= PLC_SAMPLE_INTERVAL_MS)
+    {
+      lastRefresh = millis();
+      setRollReferenceNow(false);
+    }
+
+    delay(50);
+  }
+}
+
+// =====================================================
+// WAIT AT SENSOR 2
+// =====================================================
+
+void waitAtSensor2UntilStartCount()
+{
+  uint32_t currentPosition = 0;
+
+  Serial.println();
+  Serial.print(F("Holding at sensor 2 until PLC count reaches "));
+  Serial.println(START_COUNT_TRIGGER);
+
+  while (!faulted)
+  {
+    if (readRollPosition(currentPosition))
+    {
+      if (currentPosition >= START_COUNT_TRIGGER)
+      {
+        Serial.print(F("Start trigger reached at count "));
+        Serial.println(currentPosition);
+        break;
+      }
+    }
+
+    delay(START_WAIT_CHECK_MS);
+  }
+
+  setRollReferenceNow(true);
+  stepAccumulator = 0.0;
+}
+
+// =====================================================
+// CALIBRATION MOVES
+// =====================================================
+
+bool moveUntilAnySensor(long maxSteps, bool dir, unsigned long stepIntervalUs, SensorHit &hitSensor)
+{
+  Serial.println(F("Find first sensor"));
+
+  digitalWrite(DIR_PIN, dir);
+  delay(20);
+
+  for (long i = 0; i < maxSteps; i++)
+  {
+    SensorHit stateBefore = getSensorState();
+
+    if (stateBefore == SENSOR_BOTH)
+    {
+      hitSensor = SENSOR_BOTH;
+      return false;
+    }
+
+    if (stateBefore == SENSOR_PROX_0 || stateBefore == SENSOR_PROX_1)
+    {
+      hitSensor = stateBefore;
+      return true;
+    }
+
+    doOneStep(stepIntervalUs);
+
+    SensorHit stateAfter = getSensorState();
+
+    if (stateAfter == SENSOR_BOTH)
+    {
+      hitSensor = SENSOR_BOTH;
+      return false;
+    }
+
+    if (stateAfter == SENSOR_PROX_0 || stateAfter == SENSOR_PROX_1)
+    {
+      Serial.print(F("Found "));
+      printSensorName(stateAfter);
+      Serial.print(F(" at "));
+      Serial.println(i + 1);
+
+      hitSensor = stateAfter;
+      return true;
+    }
+  }
+
+  hitSensor = SENSOR_NONE;
+  return false;
+}
+
+bool moveUntilTargetSensorContinuous(SensorHit targetSensor, long maxSteps, bool dir, unsigned long stepIntervalUs, long &stepsTaken)
+{
+  Serial.print(F("Move to "));
+  printSensorName(targetSensor);
+  Serial.println();
+
+  stepsTaken = 0;
+
+  digitalWrite(DIR_PIN, dir);
+  delay(20);
+
+  for (long i = 0; i < maxSteps; i++)
+  {
+    doOneStep(stepIntervalUs);
+    stepsTaken = i + 1;
+
+    SensorHit state = getSensorState();
+
+    if (state == SENSOR_BOTH)
+    {
+      return false;
+    }
+
+    if (state == targetSensor)
+    {
+      Serial.print(F("Reached at "));
+      Serial.println(stepsTaken);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// =====================================================
+// SENSOR CLEARING
+// =====================================================
+
+bool clearActiveSensor(bool dir, long maxSteps, unsigned long stepIntervalUs)
+{
+  SensorHit state = getSensorState();
+
+  if (state == SENSOR_NONE)
+  {
+    return true;
+  }
+
+  if (state == SENSOR_BOTH)
+  {
+    return false;
+  }
+
+  Serial.print(F("Clear "));
+  printSensorName(state);
+  Serial.println();
+
+  digitalWrite(DIR_PIN, dir);
+  delay(20);
+
+  for (long i = 0; i < maxSteps; i++)
+  {
+    doOneStep(stepIntervalUs);
+
+    state = getSensorState();
+
+    if (state == SENSOR_NONE)
+    {
+      Serial.print(F("Cleared at "));
+      Serial.println(i + 1);
+      return true;
+    }
+
+    if (state == SENSOR_BOTH)
+    {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// =====================================================
+// RETURN HOME TO SENSOR 2
+// =====================================================
+
+void returnToSensor2AndHoldUntilStartCount()
+{
+  Serial.println();
+  Serial.println(F("PLC count is 0, returning to sensor 2 home"));
+
+  stepAccumulator = 0.0;
+  stepsThisTraverse = 0;
+
+  SensorHit state = getSensorState();
+
+  if (state == SENSOR_BOTH)
+  {
+    stopWithFault(F("Both sensors hit while returning home"));
+    return;
+  }
+
+  if (state != secondSensorFound)
+  {
+    long homeSteps = 0;
+
+    // Sensor 2 was found by moving opposite to FIRST_SEARCH_DIRECTION during calibration.
+    if (!moveUntilTargetSensorContinuous(secondSensorFound, MAX_RUN_STEPS, !FIRST_SEARCH_DIRECTION, SEARCH_STEP_INTERVAL_US, homeSteps))
+    {
+      stopWithFault(F("Failed to return to sensor 2 home"));
+      return;
+    }
+  }
+  else
+  {
+    Serial.println(F("Already at sensor 2 home"));
+  }
+
+  // Stay on sensor 2 until the PLC count reaches START_COUNT_TRIGGER.
+  waitAtSensor2UntilStartCount();
+
+  if (faulted)
+  {
+    return;
+  }
+
+  // Leave sensor 2 by moving back toward sensor 1.
+  if (!clearActiveSensor(FIRST_SEARCH_DIRECTION, MAX_CLEAR_STEPS, CLEAR_STEP_INTERVAL_US))
+  {
+    stopWithFault(F("Clear sensor 2 after home wait fail"));
+    return;
+  }
+
+  // Reset the PLC reference after waiting, so movement while held does not catch up.
+  setRollReferenceNow(true);
+
+  currentTargetSensor = firstSensorFound;
+  currentRunDirection = FIRST_SEARCH_DIRECTION;
+  stepsThisTraverse = 0;
+  stepAccumulator = 0.0;
+
+  Serial.print(F("Restarted from sensor 2 home, target "));
+  printSensorName(currentTargetSensor);
+  Serial.println();
+}
+
+// =====================================================
+// RUN MODE, PULSE DISTANCE BASED
+// =====================================================
+
+void switchToOtherSensor()
+{
+  if (currentTargetSensor == firstSensorFound)
+  {
+    currentTargetSensor = secondSensorFound;
+    currentRunDirection = !FIRST_SEARCH_DIRECTION;
+  }
+  else
+  {
+    currentTargetSensor = firstSensorFound;
+    currentRunDirection = FIRST_SEARCH_DIRECTION;
+  }
+
+  stepsThisTraverse = 0;
+  stepAccumulator = 0.0;
+
+  Serial.print(F("Next target "));
+  printSensorName(currentTargetSensor);
+  Serial.println();
+}
+
+void handleTargetReached()
+{
+  Serial.print(F("End reached "));
+  printSensorName(currentTargetSensor);
+  Serial.print(F(" steps "));
+  Serial.println(stepsThisTraverse);
+
+  unsigned long scaledDwellMs = getScaledEndWaitMs(END_DWELL_MS);
+  unsigned long scaledSlackMs = getScaledEndWaitMs(END_SLACK_WAIT_MS);
+
+  Serial.print(F("Latest roll speed pps "));
+  Serial.println(currentRollSpeedPps);
+
+  Serial.print(F("End wait scale "));
+  Serial.println(currentEndWaitScale);
+
+  Serial.print(F("End dwell scaled from "));
+  Serial.print(END_DWELL_MS);
+  Serial.print(F(" to "));
+  Serial.println(scaledDwellMs);
+
+  waitAndDiscardRollMovement(scaledDwellMs);
+
+  Serial.print(F("Slack wait scaled from "));
+  Serial.print(END_SLACK_WAIT_MS);
+  Serial.print(F(" to "));
+  Serial.println(scaledSlackMs);
+
+  waitAndDiscardRollMovement(scaledSlackMs);
+
+  if (!clearActiveSensor(!currentRunDirection, MAX_CLEAR_STEPS, CLEAR_STEP_INTERVAL_US))
+  {
+    stopWithFault(F("Clear end fail"));
+    return;
+  }
+
+  setRollReferenceNow(true);
+  switchToOtherSensor();
+}
+
+bool moveStepperStepsTowardTarget(long stepsToMove)
+{
+  if (stepsToMove <= 0)
+  {
+    return true;
+  }
+
+  digitalWrite(DIR_PIN, currentRunDirection);
+  delay(2);
+
+  for (long i = 0; i < stepsToMove; i++)
+  {
+    if (stepsThisTraverse >= MAX_RUN_STEPS)
+    {
+      stopWithFault(F("Max run steps"));
+      return false;
+    }
+
+    doOneStep(RUN_STEP_INTERVAL_US);
+    stepsThisTraverse++;
+
+    SensorHit state = getSensorState();
+
+    if (state == SENSOR_BOTH)
+    {
+      stopWithFault(F("Both sensors hit"));
+      return false;
+    }
+
+    if (state == currentTargetSensor)
+    {
+      handleTargetReached();
+      return true;
+    }
+  }
+
+  return true;
+}
+
+void processRollPulsesIfDue(bool forceRead)
+{
+  static unsigned long lastSampleAttempt = 0;
+
+  if (!forceRead)
+  {
+    if (millis() - lastSampleAttempt < PLC_SAMPLE_INTERVAL_MS)
+    {
+      return;
+    }
+  }
+
+  lastSampleAttempt = millis();
+
+  uint32_t currentPosition;
+
+  if (!readRollPosition(currentPosition))
+  {
+    return;
+  }
+
+  // If the PLC count goes to 0, return to sensor 2 and hold
+  // until the count reaches 2700 again.
+  if (RETURN_HOME_WHEN_PLC_COUNT_ZERO && currentPosition <= RETURN_HOME_COUNT)
+  {
+    returnToSensor2AndHoldUntilStartCount();
+    return;
+  }
+
+  unsigned long currentTime = millis();
+
+  if (!haveLastReading)
+  {
+    lastPosition = currentPosition;
+    lastReadTime = currentTime;
+    haveLastReading = true;
+
+    Serial.print(F("First pos "));
+    Serial.println(currentPosition);
+    return;
+  }
+
+  long pulseChange = calculatePositionChange(currentPosition, lastPosition);
+  long pulseChangeAbs = absoluteLong(pulseChange);
+
+  unsigned long timeChangeMs = currentTime - lastReadTime;
+
+  lastPosition = currentPosition;
+  lastReadTime = currentTime;
+
+  if (pulseChangeAbs > MAX_PULSE_CHANGE_PER_SAMPLE)
+  {
+    Serial.print(F("Pulse jump ignored "));
+    Serial.println(pulseChangeAbs);
+    return;
+  }
+
+  float pps = 0.0;
+
+  if (timeChangeMs > 0)
+  {
+    pps = ((float)pulseChangeAbs) / ((float)timeChangeMs / 1000.0);
+  }
+
+  updateEndWaitScaleFromSpeed(pps);
+
+  float stepsToAdd = (float)pulseChangeAbs * calculatedStepsPerRollPulse;
+  stepAccumulator += stepsToAdd;
+
+  if (stepAccumulator > MAX_STEP_ACCUMULATOR)
+  {
+    stepAccumulator = MAX_STEP_ACCUMULATOR;
+  }
+
+  long wholeSteps = (long)stepAccumulator;
+
+  if (wholeSteps > MAX_STEPS_PER_SAMPLE)
+  {
+    wholeSteps = MAX_STEPS_PER_SAMPLE;
+  }
+
+  if (PRINT_ROLL_DEBUG)
+  {
+    Serial.print(F("Pos "));
+    Serial.print(currentPosition);
+    Serial.print(F(" pulse "));
+    Serial.print(pulseChange);
+    Serial.print(F(" pps "));
+    Serial.print(pps);
+    Serial.print(F(" add "));
+    Serial.print(stepsToAdd);
+    Serial.print(F(" acc "));
+    Serial.print(stepAccumulator);
+    Serial.print(F(" move "));
+    Serial.print(wholeSteps);
+    Serial.print(F(" waitScale "));
+    Serial.println(currentEndWaitScale);
+  }
+
+  if (wholeSteps > 0)
+  {
+    if (moveStepperStepsTowardTarget(wholeSteps))
+    {
+      stepAccumulator -= (float)wholeSteps;
+
+      if (stepAccumulator < 0.0)
+      {
+        stepAccumulator = 0.0;
+      }
+    }
+  }
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+
+  pinMode(proxPin, INPUT);
+  pinMode(proxPin1, INPUT);
+
+  // Disable SD card chip select on Ethernet shield.
+  // Do not use D4 as a sensor input.
+  pinMode(4, OUTPUT);
+  digitalWrite(4, HIGH);
+
+  // Ethernet chip select pin.
+  // Do not use D10 for stepper enable.
+  pinMode(10, OUTPUT);
+  digitalWrite(10, HIGH);
+
+  Serial.begin(9600);
+  delay(1000);
+
+  Ethernet.begin(mac, arduinoIp);
+  udp.begin(FINS_PORT);
+
+  if (USE_ENABLE_PIN)
+  {
+    pinMode(ENA_PIN, OUTPUT);
+    digitalWrite(ENA_PIN, ENABLE_LEVEL);
+  }
+
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(DIR_PIN, LOW);
+
+  Serial.println(F("Stepper auto pulse relation mode"));
+  Serial.print(F("IP "));
+  Serial.println(Ethernet.localIP());
+
+  printSensorStates();
+
+  delay(1000);
+
+  printSensorStates();
+
+  if (getSensorState() != SENSOR_NONE)
+  {
+    stopWithFault(F("Start between sensors"));
+    return;
+  }
+
+  if (!moveUntilAnySensor(MAX_SEARCH_STEPS, FIRST_SEARCH_DIRECTION, SEARCH_STEP_INTERVAL_US, firstSensorFound))
+  {
+    stopWithFault(F("First sensor fail"));
+    return;
+  }
+
+  secondSensorFound = (firstSensorFound == SENSOR_PROX_0) ? SENSOR_PROX_1 : SENSOR_PROX_0;
+
+  long calibrationSteps = 0;
+
+  if (!moveUntilTargetSensorContinuous(secondSensorFound, MAX_SEARCH_STEPS, !FIRST_SEARCH_DIRECTION, SEARCH_STEP_INTERVAL_US, calibrationSteps))
+  {
+    stopWithFault(F("Second sensor fail"));
+    return;
+  }
+
+  stepsBetweenSensors = calibrationSteps;
+
+  Serial.print(F("Cal steps "));
+  Serial.println(stepsBetweenSensors);
+
+  calculateAutomaticStepsPerRollPulse();
+
+  // Calibration ends at sensor 2.
+  // Stay at sensor 2 until the PLC count reaches 2700.
+  waitAtSensor2UntilStartCount();
+
+  if (faulted)
+  {
+    return;
+  }
+
+  // Clear off sensor 2, moving toward sensor 1.
+  if (!clearActiveSensor(FIRST_SEARCH_DIRECTION, MAX_CLEAR_STEPS, CLEAR_STEP_INTERVAL_US))
+  {
+    stopWithFault(F("Clear sensor 2 after wait fail"));
+    return;
+  }
+
+  // Reset PLC reference after waiting and clearing,
+  // so it does not catch up from the hold period.
+  setRollReferenceNow(true);
+
+  currentTargetSensor = firstSensorFound;
+  currentRunDirection = FIRST_SEARCH_DIRECTION;
+  stepsThisTraverse = 0;
+  stepAccumulator = 0.0;
+
+  Serial.print(F("Run active, target "));
+  printSensorName(currentTargetSensor);
+  Serial.println();
+
+  runModeEnabled = true;
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+  if (!runModeEnabled || faulted)
+  {
+    return;
+  }
+
+  processRollPulsesIfDue(false);
+}
