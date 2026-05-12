@@ -13,7 +13,7 @@ function removeDuplicateQuotes() {
   var destSheet = ss.getSheetByName('NoDuplicates');
 
   if (!sourceSheet) {
-    SpreadsheetApp.getUi().alert('Sheet "QUOTE-PLEASE" not found.');
+    Logger.log('Sheet "QUOTE-PLEASE" not found.');
     return;
   }
 
@@ -59,14 +59,7 @@ function removeDuplicateQuotes() {
     destSheet.getRange(2, 1, uniqueRows.length, lastCol).setValues(uniqueRows);
   }
 
-  // Only show the alert when run manually (triggers have no UI context).
-  try {
-    SpreadsheetApp.getUi().alert(
-      uniqueRows.length + ' unique row(s) written to the NoDuplicates tab.'
-    );
-  } catch (e) {
-    // Running via trigger — no UI available, silently continue.
-  }
+  Logger.log(uniqueRows.length + ' unique row(s) written to the NoDuplicates tab.');
 }
 
 /**
