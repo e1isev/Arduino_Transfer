@@ -14,11 +14,11 @@ function removeDuplicateQuotes() {
   var sheetNames = ss.getSheets().map(function(s) { return '"' + s.getName() + '"'; }).join(', ');
   Logger.log('Available sheets: ' + sheetNames);
 
-  var sourceSheet = ss.getSheetByName('QUOTE-PLEASE');
+  var sourceSheet = ss.getSheetByName('SuperJoin QUOTE-PLEASE');
   var destSheet   = ss.getSheetByName('NoDuplicates');
 
   if (!sourceSheet) {
-    Logger.log('ERROR: Sheet "QUOTE-PLEASE" not found. Check the name above.');
+    Logger.log('ERROR: Sheet "SuperJoin QUOTE-PLEASE" not found. Check the name above.');
     return;
   }
 
