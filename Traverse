@@ -150,8 +150,8 @@ const unsigned long CLEAR_STEP_INTERVAL_US  = 4000;
 
 // Base end behaviour
 // Total normal end wait is now 30 seconds.
-const unsigned long END_DWELL_MS = 30000;
-const unsigned long END_SLACK_WAIT_MS = 30000;
+const unsigned long END_DWELL_MS = 35000;
+const unsigned long END_SLACK_WAIT_MS = 35000;
 
 // =====================================================
 // SAFETY LIMITS
