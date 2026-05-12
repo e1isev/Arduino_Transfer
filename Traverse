@@ -53,7 +53,7 @@ const unsigned long START_WAIT_CHECK_MS = 250;
 // If the PLC count returns to zero during run mode,
 // go back to sensor 2 and hold there again.
 const bool RETURN_HOME_WHEN_PLC_COUNT_ZERO = true;
-const uint32_t RETURN_HOME_COUNT = 0UL;
+const uint32_t RETURN_HOME_COUNT = 2699UL;
 
 // =====================================================
 // AUTOMATIC PULSE TO STEP CALIBRATION
