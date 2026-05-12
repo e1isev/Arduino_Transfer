@@ -9,57 +9,70 @@
  */
 function removeDuplicateQuotes() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Log all sheet names so a name mismatch is immediately visible in the logs.
+  var sheetNames = ss.getSheets().map(function(s) { return '"' + s.getName() + '"'; }).join(', ');
+  Logger.log('Available sheets: ' + sheetNames);
+
   var sourceSheet = ss.getSheetByName('QUOTE-PLEASE');
-  var destSheet = ss.getSheetByName('NoDuplicates');
+  var destSheet   = ss.getSheetByName('NoDuplicates');
 
   if (!sourceSheet) {
-    Logger.log('Sheet "QUOTE-PLEASE" not found.');
+    Logger.log('ERROR: Sheet "QUOTE-PLEASE" not found. Check the name above.');
     return;
   }
 
   if (!destSheet) {
     destSheet = ss.insertSheet('NoDuplicates');
+    Logger.log('NoDuplicates sheet created.');
   }
 
-  var lastCol = sourceSheet.getLastColumn();
+  // getDataRange() is safer than getLastColumn() — it never returns 0.
+  var allValues = sourceSheet.getDataRange().getValues();
+  Logger.log('Rows in QUOTE-PLEASE (including header): ' + allValues.length);
 
-  // Row 1 is assumed to be the header row.
-  var headerValues = sourceSheet.getRange(1, 1, 1, lastCol).getValues();
+  if (allValues.length < 2) {
+    Logger.log('No data rows found — NoDuplicates cleared.');
+    destSheet.clearContents();
+    return;
+  }
 
-  // Grab the top 50 data rows (rows 2–51).
-  var dataRows = sourceSheet.getRange(2, 1, 50, lastCol).getValues();
+  var numCols    = allValues[0].length;
+  var headerRow  = [allValues[0]];
+  var dataRows   = allValues.slice(1, 51); // top 50 data rows
+  Logger.log('Data rows to process: ' + dataRows.length + ' | columns: ' + numCols);
 
-  var seen = {};
+  var seen       = {};
   var uniqueRows = [];
 
   for (var i = 0; i < dataRows.length; i++) {
-    var row = dataRows[i];
+    var row      = dataRows[i];
+    var dateValue = row[4];                       // Column E
+    var customer  = String(row[5]).trim();        // Column F
 
-    // Column E = index 4 (date / week), Column F = index 5 (customer).
-    var dateValue = row[4];
-    var customer = String(row[5]).trim();
+    if (!dateValue && !customer) continue;        // skip blank rows
 
-    // Skip entirely blank rows.
-    if (!dateValue && !customer) continue;
-
-    var weekKey = getWeekStartKey(dateValue);
+    var weekKey   = getWeekStartKey(dateValue);
     var dedupeKey = weekKey + '|' + customer.toLowerCase();
 
     if (!seen[dedupeKey]) {
       seen[dedupeKey] = true;
       uniqueRows.push(row);
+    } else {
+      Logger.log('Skipped duplicate — row ' + (i + 2) + ': customer="' + customer + '" week=' + weekKey);
     }
   }
 
-  // Overwrite the destination tab with the filtered data.
+  Logger.log('Unique rows to write: ' + uniqueRows.length);
+
   destSheet.clearContents();
-  destSheet.getRange(1, 1, 1, lastCol).setValues(headerValues);
+  destSheet.getRange(1, 1, 1, numCols).setValues(headerRow);
 
   if (uniqueRows.length > 0) {
-    destSheet.getRange(2, 1, uniqueRows.length, lastCol).setValues(uniqueRows);
+    destSheet.getRange(2, 1, uniqueRows.length, numCols).setValues(uniqueRows);
   }
 
-  Logger.log(uniqueRows.length + ' unique row(s) written to the NoDuplicates tab.');
+  Logger.log('Done.');
 }
 
 /**
