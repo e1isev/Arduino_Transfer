@@ -1097,12 +1097,6 @@ void setup()
 
   printSensorStates();
 
-  if (getSensorState() != SENSOR_NONE)
-  {
-    stopWithFault(F("Start between sensors"));
-    return;
-  }
-
   if (!moveUntilAnySensor(MAX_SEARCH_STEPS, FIRST_SEARCH_DIRECTION, SEARCH_STEP_INTERVAL_US, firstSensorFound))
   {
     stopWithFault(F("First sensor fail"));
