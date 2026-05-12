@@ -90,9 +90,8 @@ const bool SCALE_END_WAITS = true;
 
 const float MIN_VALID_WAIT_SPEED_PPS = 1.0;
 
-// Reduced scaling range so slow speed does not create huge end waits.
 const float MIN_END_WAIT_SCALE = 0.50;
-const float MAX_END_WAIT_SCALE = 1.50;
+const float MAX_END_WAIT_SCALE = 5.00;
 
 float currentRollSpeedPps = BASELINE_ROLL_SPEED_PPS;
 float currentEndWaitScale = 1.0;
@@ -150,8 +149,8 @@ const unsigned long CLEAR_STEP_INTERVAL_US  = 4000;
 
 // Base end behaviour
 // Total normal end wait is now 30 seconds.
-const unsigned long END_DWELL_MS = 30000;
-const unsigned long END_SLACK_WAIT_MS = 30000;
+const unsigned long END_DWELL_MS = 35000;
+const unsigned long END_SLACK_WAIT_MS = 35000;
 
 // =====================================================
 // SAFETY LIMITS
@@ -345,8 +344,7 @@ void updateEndWaitScaleFromSpeed(float pulsesPerSecond)
 
   currentRollSpeedPps = speedAbs;
 
-  float newScale = BASELINE_ROLL_SPEED_PPS / currentRollSpeedPps;
-  currentEndWaitScale = clampFloat(newScale, MIN_END_WAIT_SCALE, MAX_END_WAIT_SCALE);
+  currentEndWaitScale = clampFloat(BASELINE_ROLL_SPEED_PPS / currentRollSpeedPps, MIN_END_WAIT_SCALE, MAX_END_WAIT_SCALE);
 }
 
 unsigned long getScaledEndWaitMs(unsigned long baseWaitMs)
