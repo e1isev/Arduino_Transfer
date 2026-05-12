@@ -1,11 +1,11 @@
 /**
- * Reads the top 50 data rows from the "QUOTE-PLEASE" tab, removes rows where
- * the same customer (column F) appears more than once within the same calendar
- * week (derived from column E), and writes the de-duplicated results to the
+ * Reads the top 50 data rows from the "QUOTE-PLEASE" tab, skips rows where
+ * the same customer (column F) already appears within the same calendar week
+ * (derived from column E), and writes the de-duplicated results to the
  * "NoDuplicates" tab.
  *
- * Run this function manually from the Apps Script editor, or attach it to a
- * button / trigger as needed.
+ * Called automatically every 2 hours by the trigger installed via
+ * setupTrigger(). Can also be run manually from the Apps Script editor.
  */
 function removeDuplicateQuotes() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -13,7 +13,7 @@ function removeDuplicateQuotes() {
   var destSheet = ss.getSheetByName('NoDuplicates');
 
   if (!sourceSheet) {
-    SpreadsheetApp.getUi().alert('Sheet "QUOTE-PLEASE" not found.');
+    Logger.log('Sheet "QUOTE-PLEASE" not found.');
     return;
   }
 
@@ -59,9 +59,43 @@ function removeDuplicateQuotes() {
     destSheet.getRange(2, 1, uniqueRows.length, lastCol).setValues(uniqueRows);
   }
 
+  Logger.log(uniqueRows.length + ' unique row(s) written to the NoDuplicates tab.');
+}
+
+/**
+ * Installs a time-based trigger that runs removeDuplicateQuotes every 2 hours.
+ * Run this function ONCE from the Apps Script editor to activate the schedule.
+ * Running it again will not create duplicate triggers.
+ */
+function setupTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes') {
+      return; // Trigger already exists.
+    }
+  }
+
+  ScriptApp.newTrigger('removeDuplicateQuotes')
+    .timeBased()
+    .everyHours(2)
+    .create();
+
   SpreadsheetApp.getUi().alert(
-    uniqueRows.length + ' unique row(s) written to the NoDuplicates tab.'
+    'Trigger set. removeDuplicateQuotes will run every 2 hours.'
   );
+}
+
+/**
+ * Removes all time-based triggers for removeDuplicateQuotes.
+ * Run this from the Apps Script editor if you want to stop the schedule.
+ */
+function removeTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
 }
 
 /**
