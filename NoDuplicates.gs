@@ -196,11 +196,14 @@ function getWeekStartKey(dateValue) {
   if (dateValue instanceof Date) {
     date = dateValue;
   } else {
-    // Column E contains strings like "11/5/2026-21:50:18:354-v31q9".
-    // Extract just the leading date portion before the first hyphen.
+    // Column E contains strings like "13/5/2026-16:20:20:992-rmhiu" (DD/MM/YYYY).
+    // Parse parts explicitly — new Date("13/5/2026") treats it as MM/DD and
+    // returns Invalid Date for day-values > 12, breaking deduplication.
     var str = String(dateValue);
-    var dateMatch = str.match(/^(\d{1,2}\/\d{1,2}\/\d{4})/);
-    date = dateMatch ? new Date(dateMatch[1]) : new Date(str);
+    var dateMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    date = dateMatch
+      ? new Date(parseInt(dateMatch[3]), parseInt(dateMatch[2]) - 1, parseInt(dateMatch[1]))
+      : new Date(str);
   }
 
   if (isNaN(date.getTime())) return String(dateValue);
