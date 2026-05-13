@@ -1,11 +1,69 @@
 /**
+ * Adds a "NoDuplicates" menu to the spreadsheet toolbar when the file opens.
+ * "Refresh Now" lets you manually re-run the deduplication at any time.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('NoDuplicates')
+    .addItem('Refresh Now', 'removeDuplicateQuotes')
+    .addSeparator()
+    .addItem('Start 1-min auto-refresh', 'setupMinuteTrigger')
+    .addItem('Stop 1-min auto-refresh',  'removeMinuteTrigger')
+    .addToUi();
+}
+
+/**
+ * Installs a trigger that runs removeDuplicateQuotes every minute.
+ * Use "NoDuplicates > Start 1-min auto-refresh" in the sheet menu,
+ * or run it once from the Apps Script editor.
+ * Running it again will not create duplicate triggers.
+ */
+function setupMinuteTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes' &&
+        triggers[i].getTriggerSource() === ScriptApp.TriggerSource.CLOCK &&
+        triggers[i].getEventType()    === ScriptApp.EventType.CLOCK) {
+      // Check if an existing trigger runs on a 1-minute interval.
+      // everyMinutes(1) triggers report a specific type — delete and recreate
+      // only if it doesn't already exist at the 1-minute cadence.
+      ScriptApp.deleteTrigger(triggers[i]); // replace any old interval with 1 min
+    }
+  }
+
+  ScriptApp.newTrigger('removeDuplicateQuotes')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+
+  SpreadsheetApp.getUi().alert(
+    '1-minute auto-refresh started.\n\nUse "Stop 1-min auto-refresh" to cancel it.'
+  );
+}
+
+/**
+ * Removes the 1-minute trigger (and any other time-based trigger for
+ * removeDuplicateQuotes). Keeps the 2-hour trigger if you want that instead —
+ * run setupTrigger() to reinstate it after stopping the minute trigger.
+ */
+function removeMinuteTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  SpreadsheetApp.getUi().alert('Auto-refresh stopped.');
+}
+
+/**
  * Reads the top 50 data rows from the "QUOTE-PLEASE" tab, skips rows where
  * the same customer (column F) already appears within the same calendar week
  * (derived from column E), and writes the de-duplicated results to the
  * "NoDuplicates" tab.
  *
- * Called automatically every 2 hours by the trigger installed via
- * setupTrigger(). Can also be run manually from the Apps Script editor.
+ * Called automatically by the active trigger, or manually via
+ * NoDuplicates > Refresh Now in the sheet menu.
  */
 function removeDuplicateQuotes() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
