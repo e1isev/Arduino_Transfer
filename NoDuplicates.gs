@@ -103,10 +103,10 @@ function removeDuplicateQuotes() {
   // Log header so column positions are visible in the execution log.
   Logger.log('Header row: ' + JSON.stringify(allValues[0]));
 
-  // Log first 3 data rows to confirm what is actually in columns E (4) and F (5).
+  // Log first 3 data rows to confirm what is actually in columns E (4) and H (7).
   for (var d = 0; d < Math.min(3, dataRows.length); d++) {
     Logger.log('Data row ' + (d + 2) + ' col E=' + JSON.stringify(dataRows[d][4]) +
-               ' col F=' + JSON.stringify(dataRows[d][5]) +
+               ' col H=' + JSON.stringify(dataRows[d][7]) +
                ' full=' + JSON.stringify(dataRows[d]));
   }
 
@@ -116,20 +116,20 @@ function removeDuplicateQuotes() {
   for (var i = 0; i < dataRows.length; i++) {
     var row      = dataRows[i];
     var dateValue = row[4];                       // Column E
-    var customer  = String(row[5]).trim();        // Column F
+    var email     = String(row[7]).trim();        // Column H
 
     // Skip only rows that are entirely blank across all cells.
     var allBlank = row.every(function(cell) { return cell === '' || cell === null || cell === undefined; });
     if (allBlank) continue;
 
     var weekKey   = getWeekStartKey(dateValue);
-    var dedupeKey = weekKey + '|' + customer.toLowerCase();
+    var dedupeKey = weekKey + '|' + email.toLowerCase();
 
     if (!seen[dedupeKey]) {
       seen[dedupeKey] = true;
       uniqueRows.push(row);
     } else {
-      Logger.log('Skipped duplicate — row ' + (i + 2) + ': customer="' + customer + '" week=' + weekKey);
+      Logger.log('Skipped duplicate — row ' + (i + 2) + ': email="' + email + '" week=' + weekKey);
     }
   }
 
@@ -196,11 +196,14 @@ function getWeekStartKey(dateValue) {
   if (dateValue instanceof Date) {
     date = dateValue;
   } else {
-    // Column E contains strings like "11/5/2026-21:50:18:354-v31q9".
-    // Extract just the leading date portion before the first hyphen.
+    // Column E contains strings like "13/5/2026-16:20:20:992-rmhiu" (DD/MM/YYYY).
+    // Parse parts explicitly — new Date("13/5/2026") treats it as MM/DD and
+    // returns Invalid Date for day-values > 12, breaking deduplication.
     var str = String(dateValue);
-    var dateMatch = str.match(/^(\d{1,2}\/\d{1,2}\/\d{4})/);
-    date = dateMatch ? new Date(dateMatch[1]) : new Date(str);
+    var dateMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    date = dateMatch
+      ? new Date(parseInt(dateMatch[3]), parseInt(dateMatch[2]) - 1, parseInt(dateMatch[1]))
+      : new Date(str);
   }
 
   if (isNaN(date.getTime())) return String(dateValue);
