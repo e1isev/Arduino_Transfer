@@ -9,6 +9,9 @@ function onOpen() {
     .addSeparator()
     .addItem('Start 1-min auto-refresh', 'setupMinuteTrigger')
     .addItem('Stop 1-min auto-refresh',  'removeMinuteTrigger')
+    .addSeparator()
+    .addItem('Enable instant on-change refresh', 'setupOnChangeTrigger')
+    .addItem('Disable instant on-change refresh', 'removeOnChangeTrigger')
     .addToUi();
 }
 
@@ -143,6 +146,46 @@ function removeDuplicateQuotes() {
   }
 
   Logger.log('Done.');
+}
+
+/**
+ * Installs an onChange trigger so removeDuplicateQuotes fires immediately
+ * whenever any data is written to the spreadsheet (form submissions, SuperJoin
+ * imports, manual edits). This closes the timing race where SuperJoin could
+ * export a duplicate before the minute-timer had a chance to filter it.
+ */
+function setupOnChangeTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes' &&
+        triggers[i].getEventType() === ScriptApp.EventType.ON_CHANGE) {
+      SpreadsheetApp.getUi().alert('On-change trigger already active.');
+      return;
+    }
+  }
+
+  ScriptApp.newTrigger('removeDuplicateQuotes')
+    .forSpreadsheet(SpreadsheetApp.getActive())
+    .onChange()
+    .create();
+
+  SpreadsheetApp.getUi().alert(
+    'On-change trigger enabled.\n\nNoDuplicates will now refresh instantly whenever new data arrives.'
+  );
+}
+
+/**
+ * Removes the onChange trigger for removeDuplicateQuotes.
+ */
+function removeOnChangeTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'removeDuplicateQuotes' &&
+        triggers[i].getEventType() === ScriptApp.EventType.ON_CHANGE) {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  SpreadsheetApp.getUi().alert('On-change trigger removed.');
 }
 
 /**
